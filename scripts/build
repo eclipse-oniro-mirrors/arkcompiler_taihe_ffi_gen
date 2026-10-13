@@ -21,6 +21,7 @@ from io import StringIO
 import shutil
 import subprocess
 import sys
+import time
 from typing import TYPE_CHECKING, Final
 from pathlib import Path
 import platform
@@ -119,44 +120,69 @@ def create_tar(
     rename_root: str,
     timestamp: float,
 ):
-    out_tgz.unlink(missing_ok=True)
-    try:
-        if strip_version:
-            if platform.system() == "Darwin":
-                tar_cmd = ["tar", "--create", "--gzip", "--file", out_tgz]
-                # Rename the root directory.
-                tar_cmd += ["-s", f"/^{in_dir.name}/{rename_root}/"]
-                # Pass the root dir now.
-                tar_cmd += ["-C", in_dir.parent, in_dir.name]
-            else:
-                tar_cmd = ["tar", "--create", "--gzip", "--file", str(out_tgz)]
-                # Rename the root directory.
-                tar_cmd += ["--transform", f"s/^{in_dir.name}/{rename_root}/"]
-                # Ignore "file changed as we read it" — harmless race with post-install
-                tar_cmd += ["--warning=no-file-changed"]
-                # Pass the root dir now.
-                tar_cmd += ["-C", str(in_dir.parent), in_dir.name]
-            subprocess.run(tar_cmd, check=True, capture_output=True, text=True)
-        else:
-            tar_cmd = ["tar", "--create", "--gzip", "--format=gnu", "--file", out_tgz]
-            # Ensure consistent user name.
-            tar_cmd += ["--owner=0", "--group=0", "--numeric-owner"]
-            # Ensure consistent ordering and timestamp (2024-01-01)
-            tar_cmd += ["--sort=name", f"--mtime=@{timestamp}"]
+    if strip_version:
+        if platform.system() == "Darwin":
+            tar_cmd = ["tar", "--create", "--gzip", "--file", out_tgz]
             # Rename the root directory.
-            tar_cmd += [f"--transform=s#^{in_dir.name}#{rename_root}#"]
-            # Ignore "file changed as we read it" — harmless race with post-install
-            tar_cmd += ["--warning=no-file-changed"]
+            tar_cmd += ["-s", f"/^{in_dir.name}/{rename_root}/"]
             # Pass the root dir now.
             tar_cmd += ["-C", in_dir.parent, in_dir.name]
+        else:
+            tar_cmd = ["tar", "--create", "--gzip", "--file", str(out_tgz)]
+            # Rename the root directory.
+            tar_cmd += ["--transform", f"s/^{in_dir.name}/{rename_root}/"]
+            # Pass the root dir now.
+            tar_cmd += ["-C", str(in_dir.parent), in_dir.name]
+    else:
+        tar_cmd = ["tar", "--create", "--gzip", "--format=gnu", "--file", out_tgz]
+        # Ensure consistent user name.
+        tar_cmd += ["--owner=0", "--group=0", "--numeric-owner"]
+        # Ensure consistent ordering and timestamp (2024-01-01)
+        tar_cmd += ["--sort=name", f"--mtime=@{timestamp}"]
+        # Rename the root directory.
+        tar_cmd += [f"--transform=s#^{in_dir.name}#{rename_root}#"]
+        # Pass the root dir now.
+        tar_cmd += ["-C", in_dir.parent, in_dir.name]
+
+    max_attempts = 6  # First attempt plus 5 retries.
+    for attempt in range(1, max_attempts + 1):
+        out_tgz.unlink(missing_ok=True)
+        try:
             subprocess.run(tar_cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error creating package: {e}")
-        print(f"Command output: {e.stderr}")
-        raise
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        raise
+            return
+        except subprocess.CalledProcessError as e:
+            if attempt < max_attempts:
+                print(f"Warning: tar failed on attempt {attempt}/{max_attempts}: {e}")
+                print(f"Command output: {e.stderr}")
+                time.sleep(0.5 * attempt)
+                continue
+
+            if e.returncode == 1:
+                if out_tgz.exists() and out_tgz.stat().st_size > 0:
+                    print("Warning: tar exited with code 1 after retries; ignoring.")
+                    print(f"Command output: {e.stderr}")
+                    return
+                print(
+                    "Error: tar exited with code 1 after retries "
+                    f"but package is missing or empty: {out_tgz}"
+                )
+                print(f"Command output: {e.stderr}")
+                raise
+
+            print(f"Error creating package after retries: {e}")
+            print(f"Command output: {e.stderr}")
+            raise
+        except Exception as e:
+            if attempt < max_attempts:
+                print(
+                    "Warning: unexpected error creating package "
+                    f"on attempt {attempt}/{max_attempts}: {e}"
+                )
+                time.sleep(0.5 * attempt)
+                continue
+
+            print(f"Unexpected error creating package after retries: {e}")
+            raise
 
 
 class PythonBundle:
