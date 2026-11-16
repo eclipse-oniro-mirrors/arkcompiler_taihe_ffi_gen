@@ -202,12 +202,7 @@ class StsCodeGenerator:
 
 
 class StsModuleGenerator:
-    def __init__(
-        self,
-        om: OutputManager,
-        am: AnalysisManager,
-        mod: ArkTsModule,
-    ):
+    def __init__(self, om: OutputManager, am: AnalysisManager, mod: ArkTsModule):
         self.am = am
         self.target = StsWriter(om, mod)
         self.mod = mod

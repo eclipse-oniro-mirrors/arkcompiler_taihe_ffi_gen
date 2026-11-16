@@ -24,6 +24,14 @@ function add(a: i32, b: i32): String;
 taihe-tryit generate -u sts cookbook/hello_world
 ```
 
+需要生成 `.ats` 文件（而非 `.ets`）时，添加 `-Carkts:use-ats-extension`：
+
+```sh
+taihe-tryit generate -u sts cookbook/hello_world -Carkts:use-ats-extension
+```
+
+此时 `generated/hello_world.ats` 会替代 `generated/hello_world.ets` 生成，跨模块 import 路径也使用 `.ats` 后缀。
+
 > **💡 提示：函数命名规则**
 >
 > Taihe IDL 中的函数名默认会在 ArkTS 侧转为小驼峰命名（首字母小写）：

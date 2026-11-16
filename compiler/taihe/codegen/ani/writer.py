@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -121,14 +121,14 @@ ETS_COMMENT_PREFIX = "// "
 class ArkTsImportManager:
     """A mixin class that manages ArkTS import statements."""
 
-    def __init__(self, mod: "ArkTsModule", *, is_static: bool = True):
+    def __init__(self, mod: "ArkTsModule"):
         self.module = mod
         self.import_dict: dict[str, tuple[str, str | None]] = {}
         self.typealias_dict: dict[str, tuple[str, ...]] = {}
-        self.is_static = is_static
+        self.use_ats = mod.parent.use_ats
 
     def gen_prologue(self):
-        if self.is_static:
+        if not self.use_ats:
             yield '"use static";'
         for import_name, (module_path, member_name) in self.import_dict.items():
             if member_name is None:
@@ -204,17 +204,15 @@ class StsWriter(FileWriter, ArkTsImportManager):
         self,
         om: OutputManager,
         mod: "ArkTsModule",
-        *,
-        is_static: bool = True,
     ):
         super().__init__(
             om,
-            "/".join(mod.relative_path),
+            "/".join(mod.get_relative_path()),
             group=None,
             default_indent=ETS_DEFAULT_INDENT,
             comment_prefix=ETS_COMMENT_PREFIX,
         )
-        ArkTsImportManager.__init__(self, mod, is_static=is_static)
+        ArkTsImportManager.__init__(self, mod)
 
     @override
     def write_prologue(self, f: TextIO):

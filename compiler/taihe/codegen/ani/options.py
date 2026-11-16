@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -34,6 +34,20 @@ class ArktsKeepNameOption(AbstractConfigOption):
     """
 
     NAME = "arkts:keep-name"
+
+    @classmethod
+    def try_parse(cls, value: str | None, dm: "DiagnosticsManager"):
+        return cls()
+
+
+@dataclass
+class ArktsUseAtsExtensionOption(AbstractConfigOption):
+    """Generate .ats files instead of .ets files.
+
+    Usage: -Carkts:use-ats-extension
+    """
+
+    NAME = "arkts:use-ats-extension"
 
     @classmethod
     def try_parse(cls, value: str | None, dm: "DiagnosticsManager"):
@@ -81,6 +95,7 @@ class ArktsPathPrefixOption(AbstractConfigOption):
 # All ANI config options for easy registration
 all_ani_config_options = [
     ArktsKeepNameOption,
+    ArktsUseAtsExtensionOption,
     ArktsModulePrefixOption,
     ArktsPathPrefixOption,
 ]

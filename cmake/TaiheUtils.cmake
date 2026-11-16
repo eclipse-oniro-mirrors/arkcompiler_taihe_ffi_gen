@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -253,7 +253,7 @@ endfunction()
 function(write_arkts_config arktsconfig ets_files)
   foreach(file IN LISTS ets_files)
     get_filename_component(file_name ${file} NAME)
-    string(REGEX REPLACE "\\.ets$" "" stripped_file "${file_name}")
+    string(REGEX REPLACE "\\.(ets|ats)$" "" stripped_file "${file_name}")
     set(entry "      \"${stripped_file}\": [\"${file}\"]")
     list(APPEND ETS_PATAIHE_ENTRIES "${entry}")
   endforeach()

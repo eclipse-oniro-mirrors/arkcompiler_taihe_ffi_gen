@@ -136,6 +136,7 @@ from taihe.utils.analyses import AbstractAnalysis, AnalysisManager
 class ArkTsOutDir(AbstractAnalysis[PackageGroup]):
     module_prefix: str | None = None
     path_prefix: str | None = None
+    use_ats: bool = False
 
     @classmethod
     @override
@@ -450,7 +451,11 @@ class ArkTsModule(ArkTsModuleOrNamespace):
 
     @property
     def relative_path(self) -> list[str]:
-        return f"{self.module_name}.ets".split("/")
+        return self.get_relative_path()
+
+    def get_relative_path(self) -> list[str]:
+        extension = "ats" if self.parent.use_ats else "ets"
+        return f"{self.module_name}.{extension}".split("/")
 
     def relative_path_to(self, base: "ArkTsModule") -> list[str]:
         if self.parent != base.parent:
@@ -458,8 +463,8 @@ class ArkTsModule(ArkTsModuleOrNamespace):
                 f"Cannot compute relative path between modules in different output directories: "
                 f"{self.parent} vs {base.parent}"
             )
-        self_path = self.relative_path
-        base_path = base.relative_path[:-1]
+        self_path = self.get_relative_path()
+        base_path = base.get_relative_path()[:-1]
         while self_path and base_path and self_path[0] == base_path[0]:
             self_path.pop(0)
             base_path.pop(0)
