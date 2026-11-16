@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -34,6 +34,7 @@ class AniBridgeBackendConfig(BackendConfig):
     keep_name: bool = False
     module_prefix: str | None = None
     path_prefix: str | None = None
+    use_ats: bool = False
 
     @classmethod
     def register_options_to(cls, option_registry: "OptionRegistry"):
@@ -47,13 +48,16 @@ class AniBridgeBackendConfig(BackendConfig):
             ArktsKeepNameOption,
             ArktsModulePrefixOption,
             ArktsPathPrefixOption,
+            ArktsUseAtsExtensionOption,
         )
 
         keep_name_opt = options.get(ArktsKeepNameOption)
+        use_ats_opt = options.get(ArktsUseAtsExtensionOption)
         module_prefix_opt = options.get(ArktsModulePrefixOption)
         path_prefix_opt = options.get(ArktsPathPrefixOption)
         return AniBridgeBackendConfig(
             keep_name=keep_name_opt is not None,
+            use_ats=use_ats_opt is not None,
             module_prefix=module_prefix_opt.prefix if module_prefix_opt else None,
             path_prefix=path_prefix_opt.prefix if path_prefix_opt else None,
         )
@@ -85,7 +89,11 @@ class AniBridgeBackendConfig(BackendConfig):
                 ArkTsOutDir.provide(
                     self._ci.analysis_manager,
                     self._ci.package_group,
-                    ArkTsOutDir(self._config.module_prefix, self._config.path_prefix),
+                    ArkTsOutDir(
+                        self._config.module_prefix,
+                        self._config.path_prefix,
+                        use_ats=self._config.use_ats,
+                    ),
                 )
                 if self._config.keep_name:
                     for p in self._ci.package_group.iterate():

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -27,19 +27,19 @@ set(IDL_FILES
 )
 
 set(GEN_ETS_FILES
-    "export_enum.ets"
-    "export_iface.ets"
-    "export_ns.ets"
-    "export_struct.ets"
-    "export_union.ets"
-    "export_toplevel_func.ets"
-    "import_example.ets"
+    "export_enum.ats"
+    "export_iface.ats"
+    "export_ns.ats"
+    "export_struct.ats"
+    "export_union.ats"
+    "export_toplevel_func.ats"
+    "import_example.ats"
 )
 
 set(USER_ETS_FILES
-    "${CMAKE_CURRENT_LIST_DIR}/user/main.ets"
+    "${CMAKE_CURRENT_LIST_DIR}/user/main.ats"
 )
 
 file(GLOB AUTHOR_CPP_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/author/src/*.cpp")
 
-add_ani_demo(ani_export_default "${IDL_FILES}" "" "${GEN_ETS_FILES}" "${USER_ETS_FILES}" "" "${AUTHOR_CPP_FILES}")
+add_ani_demo(ani_export_default "${IDL_FILES}" "-Carkts:use-ats-extension" "${GEN_ETS_FILES}" "${USER_ETS_FILES}" "" "${AUTHOR_CPP_FILES}")

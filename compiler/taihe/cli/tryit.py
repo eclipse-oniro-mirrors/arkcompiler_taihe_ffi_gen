@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2025 Huawei Device Co., Ltd.
+# Copyright (c) 2025-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -382,7 +382,7 @@ class StsBuildSystem(BuildSystem):
 
     def _create_user_files(self) -> None:
         create_directory(self.user_dir)
-        with open(self.user_dir / "main.ets", "w") as f:
+        with open(self.user_dir / "main.ats", "w") as f:
             f.write(
                 f'import * as hello from "hello";\n'
                 f"\n"
@@ -423,9 +423,9 @@ class StsBuildSystem(BuildSystem):
         logger.info("Compiling and linking ABC files...")
 
         paths: dict[str, Path] = {}
-        for path in self.generated_dir.glob("*.ets"):
+        for path in self.generated_dir.glob("*.ats"):
             paths[path.stem] = path
-        for path in self.user_dir.glob("*.ets"):
+        for path in self.user_dir.glob("*.ats"):
             paths[path.stem] = path
 
         self.ark_toolchain.create_arktsconfig(self.arktsconfig_file, paths)
@@ -433,14 +433,14 @@ class StsBuildSystem(BuildSystem):
         create_directory(self.build_generated_dir)
         generated_abc = self.ark_toolchain.compile(
             self.build_generated_dir,
-            self.generated_dir.glob("*.ets"),
+            self.generated_dir.glob("*.ats"),
             self.arktsconfig_file,
         )
 
         create_directory(self.build_user_dir)
         user_abc = self.ark_toolchain.compile(
             self.build_user_dir,
-            self.user_dir.glob("*.ets"),
+            self.user_dir.glob("*.ats"),
             self.arktsconfig_file,
         )
 
