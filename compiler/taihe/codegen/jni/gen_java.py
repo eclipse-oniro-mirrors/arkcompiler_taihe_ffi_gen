@@ -17,7 +17,6 @@ from taihe.codegen.jni.analyses import (
     EnumJniInfo,
     GlobFuncJniInfo,
     IfaceJniInfo,
-    IfaceMethodJniInfo,
     PackageJniInfo,
     StructJniInfo,
     get_config,
@@ -136,10 +135,11 @@ class JavaCodeGenerator:
                     )
                 target.writelns("")
                 create_params = []
-                for field in struct.fields:
-                    if is_void_like(field.ty):
+                leaves = [parts[-1] for parts in struct_jni_info.final_fields]
+                for leaf in leaves:
+                    if is_void_like(leaf.ty):
                         continue
-                    create_params.append(f"{self.java_field_type(field)} {field.name}")
+                    create_params.append(f"{self.java_field_type(leaf)} {leaf.name}")
                 target.writelns(
                     f"public static native {struct_jni_info.java_name} create({', '.join(create_params)});",
                 )
@@ -148,12 +148,12 @@ class JavaCodeGenerator:
                     target.writelns(
                         f"public native void destroy();",
                     )
-                for field in struct.fields:
-                    if is_void_like(field.ty):
+                for leaf in leaves:
+                    if is_void_like(leaf.ty):
                         continue
                     target.writelns(
-                        f"public native {self.java_field_type(field)} {getter_name(field.name)}();",
-                        f"public native void {setter_name(field.name)}({self.java_field_type(field)} value);",
+                        f"public native {self.java_field_type(leaf)} {getter_name(leaf.name)}();",
+                        f"public native void {setter_name(leaf.name)}({self.java_field_type(leaf)} value);",
                     )
 
     ########################
@@ -183,10 +183,9 @@ class JavaCodeGenerator:
                     target.writelns(
                         f"public native void destroy();",
                     )
-                for method in iface.methods:
-                    java_name = IfaceMethodJniInfo.get(self.am, method).java_name
+                for local_name, method in iface_jni_info.methods:
                     target.writelns(
-                        f"public native {self.java_return_type(method)} {java_name}({self.java_param_list(method)});",
+                        f"public native {self.java_return_type(method)} {local_name}({self.java_param_list(method)});",
                     )
 
     ########################

@@ -68,7 +68,7 @@ def test_function_with_no_params_returning_void(tmp_path: Path):
     )
 
 
-def test_interface_extends_keeps_declared_methods(tmp_path: Path):
+def test_interface_extends_inherits_parent_methods(tmp_path: Path):
     outputs = _compile(
         tmp_path,
         {
@@ -77,11 +77,13 @@ def test_interface_extends_keeps_declared_methods(tmp_path: Path):
     )
     java = outputs["demo/Child.java"]
     assert "public native int walk();" in java
-    assert "run()" not in java
+    assert "public native int run();" in java
 
     cpp = outputs["src/demo.jni.cpp"]
     assert "Java_demo_Child_walk" in cpp
+    assert "Java_demo_Child_run" in cpp
     assert "Java_demo_Base_run" in cpp
+    assert "cpp_ptr->run()" in cpp
 
 
 def test_multiple_interfaces(tmp_path: Path):

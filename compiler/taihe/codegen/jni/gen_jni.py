@@ -20,6 +20,7 @@ from taihe.codegen.abi.analyses import (
     IfaceMethodAbiInfo,
 )
 from taihe.codegen.abi.writer import CSourceWriter
+from taihe.codegen.ani.attributes import ExtendsAttr
 from taihe.codegen.cpp.analyses import (
     GlobFuncCppUserInfo,
     IfaceCppInfo,
@@ -31,7 +32,6 @@ from taihe.codegen.cpp.analyses import (
 from taihe.codegen.jni.analyses import (
     GlobFuncJniInfo,
     IfaceJniInfo,
-    IfaceMethodJniInfo,
     PackageJniInfo,
     StructJniInfo,
     TypeJniInfo,
@@ -259,17 +259,33 @@ class JniPackageSourceGenerator:
     # Structs               #
     ########################
 
+    @staticmethod
+    def _member_expr(parts: list[StructFieldDecl]) -> str:
+        expr = parts[0].name
+        for part in parts[1:]:
+            expr += f".{part.name}"
+        return expr
+
+    def _struct_ctor_expr(self, struct: StructDecl) -> str:
+        parts = []
+        for field in struct.fields:
+            if ExtendsAttr.get(field):
+                parts.append(self._struct_ctor_expr(field.ty.decl))  # type: ignore[attr-defined]
+            else:
+                parts.append(f"std::move(from_jni_tmp_{field.name}).value()")
+        return f"{StructCppInfo.get(self.am, struct).as_owner}{{{', '.join(parts)}}}"
+
     def gen_struct(self, struct: StructDecl):
         struct_cpp_info = StructCppInfo.get(self.am, struct)
         struct_jni_info = StructJniInfo.get(self.am, struct)
         self.gen_struct_create(struct, struct_cpp_info, struct_jni_info)
         if get_config(self.am).generate_destroy:
             self.gen_struct_destroy(struct_cpp_info, struct_jni_info)
-        for field in struct.fields:
-            if is_void_like(field.ty):
+        for parts in struct_jni_info.final_fields:
+            if is_void_like(parts[-1].ty):
                 continue
-            self.gen_struct_getter(struct, struct_cpp_info, struct_jni_info, field)
-            self.gen_struct_setter(struct, struct_cpp_info, struct_jni_info, field)
+            self.gen_struct_getter(struct, struct_cpp_info, struct_jni_info, parts)
+            self.gen_struct_setter(struct, struct_cpp_info, struct_jni_info, parts)
 
     def gen_struct_create(
         self,
@@ -279,36 +295,33 @@ class JniPackageSourceGenerator:
     ):
         pkg_jni_info = PackageJniInfo.get(self.am, self.pkg)
         sym = self.native_symbol(pkg_jni_info, struct_jni_info.java_name, "create")
+        leaves = [parts[-1] for parts in struct_jni_info.final_fields]
         params_parts = []
-        for field in struct.fields:
-            if is_void_like(field.ty):
+        for leaf in leaves:
+            if is_void_like(leaf.ty):
                 continue
-            info = TypeJniInfo.get(self.am, field.ty)
-            params_parts.append(f"{info.jni_type} {field.name}")
+            info = TypeJniInfo.get(self.am, leaf.ty)
+            params_parts.append(f"{info.jni_type} {leaf.name}")
         params_str = (", " + ", ".join(params_parts)) if params_parts else ""
         with self.target.indented(
             f'extern "C" JNIEXPORT jobject JNICALL {sym}(JNIEnv* env, jclass /*cls*/{params_str}) {{',
             f"}}",
         ):
-            cpp_exprs = []
-            for field in struct.fields:
-                if is_void_like(field.ty):
+            for leaf in leaves:
+                if is_void_like(leaf.ty):
                     continue
-                info = TypeJniInfo.get(self.am, field.ty)
-                from_jni = f"from_jni_field_{field.name}"
-                tmp = f"from_jni_tmp_{field.name}"
+                info = TypeJniInfo.get(self.am, leaf.ty)
+                from_jni = f"from_jni_field_{leaf.name}"
+                tmp = f"from_jni_tmp_{leaf.name}"
                 info.gen_from_jni(self.target, from_jni)
-                self.target.writelns(f"auto {tmp} = {from_jni}(env, {field.name});")
+                self.target.writelns(f"auto {tmp} = {from_jni}(env, {leaf.name});")
                 with self.target.indented(f"if (!{tmp}.has_value()) {{", "}"):
                     self.target.writelns(
                         f"taihe_jni_throw(env, {tmp}.error());",
                         "return nullptr;",
                     )
-                cpp_exprs.append(f"std::move({tmp}).value()")
-            cpp_exprs_str = ", ".join(cpp_exprs)
-            self.target.writelns(
-                f"auto* cpp_ptr = new {struct_cpp_info.as_owner}{{{cpp_exprs_str}}};",
-            )
+            ctor_expr = self._struct_ctor_expr(struct)
+            self.target.writelns(f"auto* cpp_ptr = new {ctor_expr};")
             self.gen_wrap_object(struct_jni_info.java_desc, "cpp_ptr")
             self.target.writelns("return wrap_obj;")
         self.target.writelns("")
@@ -333,14 +346,15 @@ class JniPackageSourceGenerator:
         struct: StructDecl,
         struct_cpp_info: StructCppInfo,
         struct_jni_info: StructJniInfo,
-        field: StructFieldDecl,
+        parts: list[StructFieldDecl],
     ):
+        leaf = parts[-1]
         pkg_jni_info = PackageJniInfo.get(self.am, self.pkg)
-        info = TypeJniInfo.get(self.am, field.ty)
+        info = TypeJniInfo.get(self.am, leaf.ty)
         sym = self.native_symbol(
             pkg_jni_info,
             struct_jni_info.java_name,
-            getter_name(field.name),
+            getter_name(leaf.name),
         )
         with self.target.indented(
             f'extern "C" JNIEXPORT {info.jni_type} JNICALL {sym}(JNIEnv* env, jobject obj) {{',
@@ -348,7 +362,9 @@ class JniPackageSourceGenerator:
         ):
             self.gen_unwrap_this(struct_cpp_info.as_owner)
             info.gen_into_jni(self.target, "into_jni_field")
-            self.target.writelns(f"return into_jni_field(env, cpp_ptr->{field.name});")
+            self.target.writelns(
+                f"return into_jni_field(env, cpp_ptr->{self._member_expr(parts)});",
+            )
         self.target.writelns("")
 
     def gen_struct_setter(
@@ -356,14 +372,15 @@ class JniPackageSourceGenerator:
         struct: StructDecl,
         struct_cpp_info: StructCppInfo,
         struct_jni_info: StructJniInfo,
-        field: StructFieldDecl,
+        parts: list[StructFieldDecl],
     ):
+        leaf = parts[-1]
         pkg_jni_info = PackageJniInfo.get(self.am, self.pkg)
-        info = TypeJniInfo.get(self.am, field.ty)
+        info = TypeJniInfo.get(self.am, leaf.ty)
         sym = self.native_symbol(
             pkg_jni_info,
             struct_jni_info.java_name,
-            setter_name(field.name),
+            setter_name(leaf.name),
         )
         with self.target.indented(
             f'extern "C" JNIEXPORT void JNICALL {sym}(JNIEnv* env, jobject obj, {info.jni_type} value) {{',
@@ -378,7 +395,7 @@ class JniPackageSourceGenerator:
                     "return;",
                 )
             self.target.writelns(
-                f"cpp_ptr->{field.name} = std::move(from_jni_tmp).value();",
+                f"cpp_ptr->{self._member_expr(parts)} = std::move(from_jni_tmp).value();",
             )
         self.target.writelns("")
 
@@ -391,8 +408,14 @@ class JniPackageSourceGenerator:
         iface_jni_info = IfaceJniInfo.get(self.am, iface)
         if get_config(self.am).generate_destroy:
             self.gen_iface_destroy(iface_cpp_info, iface_jni_info)
-        for method in iface.methods:
-            self.gen_iface_method(iface, iface_cpp_info, iface_jni_info, method)
+        for local_name, method in iface_jni_info.methods:
+            self.gen_iface_method(
+                iface,
+                iface_cpp_info,
+                iface_jni_info,
+                method,
+                local_name,
+            )
 
     def gen_iface_destroy(
         self,
@@ -415,12 +438,13 @@ class JniPackageSourceGenerator:
         iface_cpp_info: IfaceCppInfo,
         iface_jni_info: IfaceJniInfo,
         method: IfaceMethodDecl,
+        local_name: str,
     ):
-        method_jni_info = IfaceMethodJniInfo.get(self.am, method)
         method_cpp_info = IfaceMethodCppInfo.get(self.am, method)
         method_abi_info = IfaceMethodAbiInfo.get(self.am, method)
         jni_ret = self.jni_return_type(method)
-        sym = method_jni_info.native_symbol
+        pkg_jni_info = PackageJniInfo.get(self.am, self.pkg)
+        sym = self.native_symbol(pkg_jni_info, iface_jni_info.java_name, local_name)
         with self.target.indented(
             f'extern "C" JNIEXPORT {jni_ret} JNICALL {sym}(JNIEnv* env, jobject obj{self.jni_param_list(method)}) {{',
             f"}}",

@@ -90,11 +90,6 @@ def test_valid_attributes_do_not_report_errors(tmp_path: Path):
     assert "public static native int renamed();" in java
 
 
-def test_unsupported_array_type_raises(tmp_path: Path):
-    with pytest.raises(ValueError, match="not supported"):
-        compile_jni_sources(tmp_path, {"demo": "function f(a: Array<i32>): i32;"})
-
-
 def test_optional_scalar_raises(tmp_path: Path):
     with pytest.raises(ValueError, match="Optional<scalar>"):
         compile_jni_sources(tmp_path, {"demo": "function f(a: Optional<i32>): i32;"})

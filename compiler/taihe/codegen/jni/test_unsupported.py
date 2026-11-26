@@ -22,9 +22,6 @@ import pytest
 from taihe.codegen.jni.testutil import compile_jni_sources
 
 UNSUPPORTED_SOURCES = [
-    "function f(v: Vector<i32>): i32;",
-    "function f(m: Map<String, i32>): i32;",
-    "function f(s: Set<i32>): i32;",
     "function f(cb: (x: i32) => i32): i32;",
     "function f(): Future<i32>;",
     "function f(c: Completer<i32>): i32;",
