@@ -15,6 +15,7 @@
 
 from dataclasses import dataclass
 
+from taihe.codegen.ani.attributes import ExtendsAttr
 from taihe.semantics.attributes import TypedAttribute
 from taihe.semantics.declarations import (
     GlobFuncDecl,
@@ -64,4 +65,5 @@ all_jni_attr_types = [
     JavaPackageAttr,
     NativeLibraryAttr,
     JavaNameAttr,
+    ExtendsAttr,
 ]

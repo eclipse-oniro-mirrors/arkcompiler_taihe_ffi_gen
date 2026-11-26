@@ -15,10 +15,13 @@
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
+from typing import cast
 
 from typing_extensions import override
 
+from taihe.codegen.abi.analyses import IfaceAbiInfo
 from taihe.codegen.abi.writer import CSourceWriter
+from taihe.codegen.ani.attributes import ExtendsAttr
 from taihe.codegen.cpp.analyses import TypeCppInfo
 from taihe.codegen.cpp.attributes import Encoding, EncodingAttr
 from taihe.codegen.jni.attributes import (
@@ -37,18 +40,23 @@ from taihe.semantics.declarations import (
     IfaceMethodDecl,
     PackageDecl,
     StructDecl,
+    StructFieldDecl,
 )
 from taihe.semantics.types import (
+    ArrayType,
     EnumType,
     IfaceType,
+    MapType,
     NonVoidType,
     OpaqueType,
     OptionalType,
     ScalarKinds,
     ScalarType,
+    SetType,
     StringType,
     StructType,
     UnitType,
+    VectorType,
 )
 from taihe.semantics.visitor import NonVoidTypeVisitor
 from taihe.utils.analyses import AbstractAnalysis, AnalysisManager
@@ -163,6 +171,19 @@ class StructJniInfo(AbstractAnalysis[StructDecl]):
         self.java_desc = java_desc_of(self.pkg_jni_info.java_pkg, d.name)
         self.jni_sig = f"L{self.java_desc};"
 
+        # Flattened field paths. A field declared with `@extends` contributes its
+        # parent's fields (prefixed with the field itself), so the resulting
+        # struct exposes inherited fields directly.
+        self.final_fields: list[list[StructFieldDecl]] = []
+        for field in d.fields:
+            if extend := ExtendsAttr.get(field):
+                parent_info = StructJniInfo.get(am, extend.ty.decl)
+                self.final_fields.extend(
+                    [field, *parts] for parts in parent_info.final_fields
+                )
+            else:
+                self.final_fields.append([field])
+
     @classmethod
     @override
     def _create(cls, am: AnalysisManager, d: StructDecl) -> "StructJniInfo":
@@ -175,6 +196,17 @@ class IfaceJniInfo(AbstractAnalysis[IfaceDecl]):
         self.java_name = d.name
         self.java_desc = java_desc_of(self.pkg_jni_info.java_pkg, d.name)
         self.jni_sig = f"L{self.java_desc};"
+
+        # Methods callable on this interface, flattened to include ancestors
+        # (child declared first, then each parent via DFS). Each entry is a
+        # (java_name, method) pair; the java_name may be renamed via @java_name.
+        self.methods: list[tuple[str, IfaceMethodDecl]] = []
+        iface_abi_info = IfaceAbiInfo.get(am, d)
+        for ancestor_info in iface_abi_info.ancestor_infos.values():
+            for method in ancestor_info.anc_iface.methods:
+                self.methods.append(
+                    (IfaceMethodJniInfo.get(am, method).java_name, method)
+                )
 
     @classmethod
     @override
@@ -226,17 +258,11 @@ class GlobFuncJniInfo(AbstractAnalysis[GlobFuncDecl]):
 class IfaceMethodJniInfo(AbstractAnalysis[IfaceMethodDecl]):
     def __init__(self, am: AnalysisManager, f: IfaceMethodDecl) -> None:
         self.pkg_jni_info = PackageJniInfo.get(am, f.parent_pkg)
-        self.iface_jni_info = IfaceJniInfo.get(am, f.parent_iface)
         if attr := JavaNameAttr.get(f):
             self.java_name = attr.java_name
         else:
             self.java_name = f.name
 
-        self.native_symbol = native_symbol(
-            self.pkg_jni_info.java_pkg,
-            self.iface_jni_info.java_name,
-            self.java_name,
-        )
         self.jni_signature = method_signature(
             [
                 jni_sig_of(am, param.ty)
@@ -605,7 +631,7 @@ class OptionalTypeJniInfo(TypeJniInfo):
         super().__init__(am, t)
         self.type = t
         item_jni_info = TypeJniInfo.get(am, t.item_ty)
-        if item_jni_info.jni_type not in ("jobject", "jstring"):
+        if isinstance(t.item_ty, ScalarType):
             raise ValueError(
                 "Optional<scalar> is not supported by the JNI backend (v1)"
             )
@@ -652,6 +678,397 @@ class OptionalTypeJniInfo(TypeJniInfo):
             )
 
 
+# Mapping from a scalar JNI type to its (primitive array type, region stem). The
+# region stem is used to compose Get/Set<X>ArrayRegion and New<X>Array.
+_JNI_ARRAY_TYPES = {
+    "jboolean": ("jbooleanArray", "Boolean"),
+    "jbyte": ("jbyteArray", "Byte"),
+    "jshort": ("jshortArray", "Short"),
+    "jint": ("jintArray", "Int"),
+    "jlong": ("jlongArray", "Long"),
+    "jfloat": ("jfloatArray", "Float"),
+    "jdouble": ("jdoubleArray", "Double"),
+}
+
+# Boxed Java type descriptors for scalar kinds, used when scalars appear as
+# elements of ArrayList/HashMap/HashSet (which box primitives).
+_SCALAR_BOXED_CLASS = {
+    ScalarKinds.BOOL: "java/lang/Boolean",
+    ScalarKinds.I8: "java/lang/Byte",
+    ScalarKinds.I16: "java/lang/Short",
+    ScalarKinds.I32: "java/lang/Integer",
+    ScalarKinds.I64: "java/lang/Long",
+    ScalarKinds.U8: "java/lang/Byte",
+    ScalarKinds.U16: "java/lang/Short",
+    ScalarKinds.U32: "java/lang/Integer",
+    ScalarKinds.U64: "java/lang/Long",
+    ScalarKinds.F32: "java/lang/Float",
+    ScalarKinds.F64: "java/lang/Double",
+}
+
+
+def _is_scalar_item(info: TypeJniInfo) -> bool:
+    return info.jni_type in _JNI_ARRAY_TYPES
+
+
+def _java_element_type(am: AnalysisManager, item_ty: NonVoidType) -> str:
+    """Return the boxed Java type name used inside collection generics."""
+    info = TypeJniInfo.get(am, item_ty)
+    if _is_scalar_item(info):
+        scalar_ty = cast(ScalarType, item_ty)
+        return _SCALAR_BOXED_CLASS[scalar_ty.kind].split("/")[-1]
+    return info.java_type
+
+
+def _gen_elem_from_jni(
+    target: CSourceWriter,
+    am: AnalysisManager,
+    item_ty: NonVoidType,
+    name: str,
+):
+    """Emit ``name`` = ``(JNIEnv*, jobject) -> expected<owner, error>``.
+
+    Reference-typed elements reuse their regular conversion; scalar elements
+    are unboxed from their Java wrapper object.
+    """
+    item_info = TypeJniInfo.get(am, item_ty)
+    if not _is_scalar_item(item_info):
+        item_info.gen_from_jni(target, name)
+        return
+    scalar_ty = cast(ScalarType, item_ty)
+    boxed_cls = _SCALAR_BOXED_CLASS[scalar_ty.kind]
+    _, jni_scalar, sig = SCALAR_JNI_MAP[scalar_ty.kind]
+    java_prim = SCALAR_JNI_MAP[scalar_ty.kind][0]
+    call = _JNI_ARRAY_TYPES[jni_scalar][1]
+    with target.indented(
+        f"static constexpr auto {name} = [](JNIEnv* env, jobject item) -> ::taihe::expected<{item_info.cpp_info.as_owner}, ::taihe::error> {{",
+        f"}};",
+    ):
+        target.writelns(
+            f'jclass boxed_cls = env->FindClass("{boxed_cls}");',
+            f'jmethodID unbox_mid = env->GetMethodID(boxed_cls, "{java_prim}Value", "(){sig}");',
+            f"{jni_scalar} v = env->Call{call}Method(item, unbox_mid);",
+            f"return static_cast<{item_info.cpp_info.as_owner}>(v);",
+        )
+
+
+def _gen_elem_into_jni(
+    target: CSourceWriter,
+    am: AnalysisManager,
+    item_ty: NonVoidType,
+    name: str,
+):
+    """Emit ``name`` = ``(JNIEnv*, <item param>) -> jobject``.
+
+    Reference-typed elements reuse their regular conversion; scalar elements
+    are boxed into their Java wrapper object.
+    """
+    item_info = TypeJniInfo.get(am, item_ty)
+    if not _is_scalar_item(item_info):
+        item_info.gen_into_jni(target, name)
+        return
+    scalar_ty = cast(ScalarType, item_ty)
+    boxed_cls = _SCALAR_BOXED_CLASS[scalar_ty.kind]
+    _, jni_scalar, sig = SCALAR_JNI_MAP[scalar_ty.kind]
+    with target.indented(
+        f"static constexpr auto {name} = [](JNIEnv* env, {item_info.cpp_info.as_param} cpp_value) -> jobject {{",
+        f"}};",
+    ):
+        target.writelns(
+            f'jclass boxed_cls = env->FindClass("{boxed_cls}");',
+            f'jmethodID value_of = env->GetStaticMethodID(boxed_cls, "valueOf", "({sig})L{boxed_cls};");',
+            f"return env->CallStaticObjectMethod(boxed_cls, value_of, static_cast<{jni_scalar}>(cpp_value));",
+        )
+
+
+class ArrayTypeJniInfo(TypeJniInfo):
+    def __init__(self, am: AnalysisManager, t: ArrayType):
+        super().__init__(am, t)
+        self.type = t
+        item_info = TypeJniInfo.get(am, t.item_ty)
+        self._is_scalar_item = _is_scalar_item(item_info)
+        if self._is_scalar_item:
+            _, jni_scalar, sig = SCALAR_JNI_MAP[cast(ScalarType, t.item_ty).kind]
+            self._array_type, self._region = _JNI_ARRAY_TYPES[jni_scalar]
+            self.java_type = f"{item_info.java_type}[]"
+            self.jni_type = self._array_type
+            self.jni_sig = f"[{sig}"
+        else:
+            self._array_type = "jobjectArray"
+            self._region = ""
+            self.java_type = f"{item_info.java_type}[]"
+            self.jni_type = "jobjectArray"
+            self.jni_sig = f"[{item_info.jni_sig}"
+
+    @override
+    def gen_from_jni(self, target: CSourceWriter, name: str):
+        item_ty = self.type.item_ty
+        item_cpp_info = TypeCppInfo.get(self.am, item_ty)
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, {self.jni_type} jni_input) -> ::taihe::expected<{self.cpp_info.as_owner}, ::taihe::error> {{",
+            f"}};",
+        ):
+            target.writelns(
+                "jsize len = env->GetArrayLength(jni_input);",
+                f"::taihe::array_builder<{item_cpp_info.as_owner}> builder(static_cast<std::size_t>(len));",
+            )
+            if self._is_scalar_item:
+                _, jni_scalar, _ = SCALAR_JNI_MAP[cast(ScalarType, item_ty).kind]
+                with target.indented(
+                    "for (jsize i = 0; i < len; i++) {",
+                    "}",
+                ):
+                    target.writelns(
+                        f"{jni_scalar} item;",
+                        f"env->Get{self._region}ArrayRegion(jni_input, i, 1, &item);",
+                        f"builder.emplace_back(static_cast<{item_cpp_info.as_owner}>(item));",
+                    )
+            else:
+                _gen_elem_from_jni(target, self.am, item_ty, "from_jni_item")
+                with target.indented(
+                    "for (jsize i = 0; i < len; i++) {",
+                    "}",
+                ):
+                    target.writelns(
+                        "jobject item = env->GetObjectArrayElement(jni_input, i);",
+                        "builder.emplace_back(TH_TRY(from_jni_item(env, item)));",
+                    )
+            target.writelns("return std::move(builder).finish();")
+
+    @override
+    def gen_into_jni(self, target: CSourceWriter, name: str):
+        item_ty = self.type.item_ty
+        item_info = TypeJniInfo.get(self.am, item_ty)
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, {self.cpp_info.as_param} cpp_value) -> {self.jni_type} {{",
+            f"}};",
+        ):
+            target.writelns("jsize len = static_cast<jsize>(cpp_value.size());")
+            if self._is_scalar_item:
+                _, jni_scalar, _ = SCALAR_JNI_MAP[cast(ScalarType, item_ty).kind]
+                target.writelns(
+                    f"{self.jni_type} result = env->New{self._region}Array(len);",
+                )
+                with target.indented(
+                    "for (jsize i = 0; i < len; i++) {",
+                    "}",
+                ):
+                    target.writelns(
+                        f"{jni_scalar} item = static_cast<{jni_scalar}>(cpp_value[i]);",
+                        f"env->Set{self._region}ArrayRegion(result, i, 1, &item);",
+                    )
+                target.writelns("return result;")
+            else:
+                _gen_elem_into_jni(target, self.am, item_ty, "into_jni_item")
+                elem_desc = item_info.jni_sig[1:-1]
+                target.writelns(
+                    f'jclass elem_cls = env->FindClass("{elem_desc}");',
+                    "jobjectArray result = env->NewObjectArray(len, elem_cls, nullptr);",
+                )
+                with target.indented(
+                    "for (jsize i = 0; i < len; i++) {",
+                    "}",
+                ):
+                    target.writelns(
+                        "jobject item = into_jni_item(env, cpp_value[i]);",
+                        "env->SetObjectArrayElement(result, i, item);",
+                    )
+                target.writelns("return result;")
+
+
+class VectorTypeJniInfo(TypeJniInfo):
+    def __init__(self, am: AnalysisManager, t: VectorType):
+        super().__init__(am, t)
+        self.type = t
+        self.java_type = f"java.util.ArrayList<{_java_element_type(am, t.val_ty)}>"
+        self.jni_type = "jobject"
+        self.jni_sig = "Ljava/util/ArrayList;"
+
+    @override
+    def gen_from_jni(self, target: CSourceWriter, name: str):
+        val_ty = self.type.val_ty
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, jobject jni_input) -> ::taihe::expected<{self.cpp_info.as_owner}, ::taihe::error> {{",
+            f"}};",
+        ):
+            target.writelns(
+                'if (jni_input == nullptr) { return ::taihe::unexpected(::taihe::error("null list")); }',
+            )
+            _gen_elem_from_jni(target, self.am, val_ty, "from_jni_item")
+            target.writelns(
+                'jclass list_cls = env->FindClass("java/util/ArrayList");',
+                'jmethodID size_mid = env->GetMethodID(list_cls, "size", "()I");',
+                'jmethodID get_mid = env->GetMethodID(list_cls, "get", "(I)Ljava/lang/Object;");',
+                "jint size = env->CallIntMethod(jni_input, size_mid);",
+                f"{self.cpp_info.as_owner} result;",
+                "result.reserve(static_cast<std::size_t>(size));",
+            )
+            with target.indented(
+                "for (jint i = 0; i < size; i++) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject item = env->CallObjectMethod(jni_input, get_mid, i);",
+                    "result.emplace_back(TH_TRY(from_jni_item(env, item)));",
+                )
+            target.writelns("return result;")
+
+    @override
+    def gen_into_jni(self, target: CSourceWriter, name: str):
+        val_ty = self.type.val_ty
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, {self.cpp_info.as_param} cpp_value) -> jobject {{",
+            f"}};",
+        ):
+            _gen_elem_into_jni(target, self.am, val_ty, "into_jni_item")
+            target.writelns(
+                'jclass list_cls = env->FindClass("java/util/ArrayList");',
+                'jmethodID ctor_mid = env->GetMethodID(list_cls, "<init>", "()V");',
+                'jmethodID add_mid = env->GetMethodID(list_cls, "add", "(Ljava/lang/Object;)Z");',
+                "jobject result = env->NewObject(list_cls, ctor_mid);",
+            )
+            with target.indented(
+                "for (auto it = cpp_value.begin(); it != cpp_value.end(); ++it) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject item = into_jni_item(env, *it);",
+                    "env->CallBooleanMethod(result, add_mid, item);",
+                )
+            target.writelns("return result;")
+
+
+class MapTypeJniInfo(TypeJniInfo):
+    def __init__(self, am: AnalysisManager, t: MapType):
+        super().__init__(am, t)
+        self.type = t
+        key_java = _java_element_type(am, t.key_ty)
+        val_java = _java_element_type(am, t.val_ty)
+        self.java_type = f"java.util.HashMap<{key_java}, {val_java}>"
+        self.jni_type = "jobject"
+        self.jni_sig = "Ljava/util/HashMap;"
+
+    @override
+    def gen_from_jni(self, target: CSourceWriter, name: str):
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, jobject jni_input) -> ::taihe::expected<{self.cpp_info.as_owner}, ::taihe::error> {{",
+            f"}};",
+        ):
+            target.writelns(
+                'if (jni_input == nullptr) { return ::taihe::unexpected(::taihe::error("null map")); }',
+            )
+            _gen_elem_from_jni(target, self.am, self.type.key_ty, "from_jni_key")
+            _gen_elem_from_jni(target, self.am, self.type.val_ty, "from_jni_value")
+            target.writelns(
+                'jclass map_cls = env->FindClass("java/util/HashMap");',
+                'jmethodID entry_set_mid = env->GetMethodID(map_cls, "entrySet", "()Ljava/util/Set;");',
+                "jobject entry_set = env->CallObjectMethod(jni_input, entry_set_mid);",
+                'jclass set_cls = env->FindClass("java/util/Set");',
+                'jmethodID to_array_mid = env->GetMethodID(set_cls, "toArray", "()[Ljava/lang/Object;");',
+                "jobjectArray entries = static_cast<jobjectArray>(env->CallObjectMethod(entry_set, to_array_mid));",
+                "jsize len = env->GetArrayLength(entries);",
+                'jclass entry_cls = env->FindClass("java/util/Map$Entry");',
+                'jmethodID get_key_mid = env->GetMethodID(entry_cls, "getKey", "()Ljava/lang/Object;");',
+                'jmethodID get_value_mid = env->GetMethodID(entry_cls, "getValue", "()Ljava/lang/Object;");',
+                f"{self.cpp_info.as_owner} result;",
+            )
+            with target.indented(
+                "for (jsize i = 0; i < len; i++) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject entry = env->GetObjectArrayElement(entries, i);",
+                    "jobject key = env->CallObjectMethod(entry, get_key_mid);",
+                    "jobject value = env->CallObjectMethod(entry, get_value_mid);",
+                    "result.emplace(TH_TRY(from_jni_key(env, key)), TH_TRY(from_jni_value(env, value)));",
+                )
+            target.writelns("return result;")
+
+    @override
+    def gen_into_jni(self, target: CSourceWriter, name: str):
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, {self.cpp_info.as_param} cpp_value) -> jobject {{",
+            f"}};",
+        ):
+            _gen_elem_into_jni(target, self.am, self.type.key_ty, "into_jni_key")
+            _gen_elem_into_jni(target, self.am, self.type.val_ty, "into_jni_value")
+            target.writelns(
+                'jclass map_cls = env->FindClass("java/util/HashMap");',
+                'jmethodID ctor_mid = env->GetMethodID(map_cls, "<init>", "()V");',
+                'jmethodID put_mid = env->GetMethodID(map_cls, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");',
+                "jobject result = env->NewObject(map_cls, ctor_mid);",
+            )
+            with target.indented(
+                "for (auto it = cpp_value.begin(); it != cpp_value.end(); ++it) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject key = into_jni_key(env, it->first);",
+                    "jobject value = into_jni_value(env, it->second);",
+                    "env->CallObjectMethod(result, put_mid, key, value);",
+                )
+            target.writelns("return result;")
+
+
+class SetTypeJniInfo(TypeJniInfo):
+    def __init__(self, am: AnalysisManager, t: SetType):
+        super().__init__(am, t)
+        self.type = t
+        self.java_type = f"java.util.HashSet<{_java_element_type(am, t.key_ty)}>"
+        self.jni_type = "jobject"
+        self.jni_sig = "Ljava/util/HashSet;"
+
+    @override
+    def gen_from_jni(self, target: CSourceWriter, name: str):
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, jobject jni_input) -> ::taihe::expected<{self.cpp_info.as_owner}, ::taihe::error> {{",
+            f"}};",
+        ):
+            target.writelns(
+                'if (jni_input == nullptr) { return ::taihe::unexpected(::taihe::error("null set")); }',
+            )
+            _gen_elem_from_jni(target, self.am, self.type.key_ty, "from_jni_item")
+            target.writelns(
+                'jclass set_cls = env->FindClass("java/util/HashSet");',
+                'jmethodID to_array_mid = env->GetMethodID(set_cls, "toArray", "()[Ljava/lang/Object;");',
+                "jobjectArray items = static_cast<jobjectArray>(env->CallObjectMethod(jni_input, to_array_mid));",
+                "jsize len = env->GetArrayLength(items);",
+                f"{self.cpp_info.as_owner} result;",
+            )
+            with target.indented(
+                "for (jsize i = 0; i < len; i++) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject item = env->GetObjectArrayElement(items, i);",
+                    "result.emplace(TH_TRY(from_jni_item(env, item)));",
+                )
+            target.writelns("return result;")
+
+    @override
+    def gen_into_jni(self, target: CSourceWriter, name: str):
+        with target.indented(
+            f"static constexpr auto {name} = [](JNIEnv* env, {self.cpp_info.as_param} cpp_value) -> jobject {{",
+            f"}};",
+        ):
+            _gen_elem_into_jni(target, self.am, self.type.key_ty, "into_jni_item")
+            target.writelns(
+                'jclass set_cls = env->FindClass("java/util/HashSet");',
+                'jmethodID ctor_mid = env->GetMethodID(set_cls, "<init>", "()V");',
+                'jmethodID add_mid = env->GetMethodID(set_cls, "add", "(Ljava/lang/Object;)Z");',
+                "jobject result = env->NewObject(set_cls, ctor_mid);",
+            )
+            with target.indented(
+                "for (auto it = cpp_value.begin(); it != cpp_value.end(); ++it) {",
+                "}",
+            ):
+                target.writelns(
+                    "jobject item = into_jni_item(env, *it);",
+                    "env->CallBooleanMethod(result, add_mid, item);",
+                )
+            target.writelns("return result;")
+
+
 class TypeJniInfoDispatcher(NonVoidTypeVisitor[TypeJniInfo]):
     def __init__(self, am: AnalysisManager):
         self.am = am
@@ -695,6 +1112,22 @@ class TypeJniInfoDispatcher(NonVoidTypeVisitor[TypeJniInfo]):
     @override
     def visit_optional_type(self, t: OptionalType) -> TypeJniInfo:
         return OptionalTypeJniInfo(self.am, t)
+
+    @override
+    def visit_array_type(self, t: ArrayType) -> TypeJniInfo:
+        return ArrayTypeJniInfo(self.am, t)
+
+    @override
+    def visit_vector_type(self, t: VectorType) -> TypeJniInfo:
+        return VectorTypeJniInfo(self.am, t)
+
+    @override
+    def visit_map_type(self, t: MapType) -> TypeJniInfo:
+        return MapTypeJniInfo(self.am, t)
+
+    @override
+    def visit_set_type(self, t: SetType) -> TypeJniInfo:
+        return SetTypeJniInfo(self.am, t)
 
     @override
     def visit_union_type(self, t) -> TypeJniInfo:

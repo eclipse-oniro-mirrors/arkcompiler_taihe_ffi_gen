@@ -167,7 +167,11 @@ class JniModuleRegisterGenerator:
         struct_jni_info = StructJniInfo.get(self.am, struct)
         reg = ClassRegistration(descriptor=struct_jni_info.java_desc)
 
-        field_infos = [f for f in struct.fields if not is_void_like(f.ty)]
+        field_infos = [
+            parts[-1]
+            for parts in struct_jni_info.final_fields
+            if not is_void_like(parts[-1].ty)
+        ]
         create_sig = method_signature(
             [jni_sig_of(self.am, f.ty) for f in field_infos],
             struct_jni_info.jni_sig,
@@ -259,13 +263,17 @@ class JniModuleRegisterGenerator:
                 )
             )
 
-        for method in iface.methods:
+        for local_name, method in iface_jni_info.methods:
             info = IfaceMethodJniInfo.get(self.am, method)
             reg.methods.append(
                 NativeMethodEntry(
-                    java_name=info.java_name,
+                    java_name=local_name,
                     signature=info.jni_signature,
-                    symbol=info.native_symbol,
+                    symbol=native_symbol(
+                        pkg_jni_info.java_pkg,
+                        iface_jni_info.java_name,
+                        local_name,
+                    ),
                     ret_jni=_jni_return_type(self.am, method),
                     param_str=_jni_param_list(self.am, method),
                     is_static=False,
